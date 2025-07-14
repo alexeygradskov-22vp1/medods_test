@@ -1,0 +1,149 @@
+openapi: 3.0.3
+info:
+  title: Api
+  version: 1.0.0
+paths:
+  /authorize:
+    post:
+      summary: Authorize user
+      description: Authorize user and return tokens
+      tags:
+        - user
+      parameters:
+        - $ref: '#/components/parameters/UserGuidParam'
+        - $ref: '#/components/parameters/UserAgent'
+      responses:
+        200:
+          description: User successfully authorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensPair'
+        400:
+          $ref: '#/components/responses/400'
+        500:
+          $ref: '#/components/responses/500'
+  /refresh:
+    post:
+      summary: refresh token
+      description: refresh tokens and return new version
+      tags:
+        - user
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokensPair'
+      responses:
+        200:
+          description: Token successfully refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensPair'
+        400:
+          $ref: '#/components/responses/400'
+        500:
+          $ref: '#/components/responses/500'
+  /user/guid:
+    get:
+      summary: get user guid by access token
+      description: get user guid by access token
+      tags:
+        - user
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            example: "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJtZWRvZHNfdGVzdCIsInN1YiI6ImY2YjRmYWUxLTU0OTYtNDM5OC1iZjM2LTAyMzgyNTA5N2ZkMiIsImF1ZCI6ImxvY2FsaG9zdDo4MDgwIiwiZXhwIjoxNzUyNTg1NjExLCJuYmYiOjE3NTI1MDEwMTEsImlhdCI6MTc1MjQ5OTIxMSwianRpIjoiSldUSUQiLCJLZXkiOiI0NTQ2ODI4Yy02MGI1LTExZjAtOWVjZi0wMDE1NWRmY2Y3NDIifQ.3ZL6D4NJns7VAA3SWEURBQT-NNudd3L-LQejwAkzbXrP28K9FU0vXZkM3yeNbuTNwcWBdlmZnM5Cjs9_Ks2B-A"
+          required: true
+      responses:
+        200:
+          description: Token successfully refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserGuid'
+        400:
+          $ref: '#/components/responses/400'
+        500:
+          $ref: '#/components/responses/500'
+  /user/logout:
+    post:
+      summary: logout by access token
+      description: logout by access token
+      tags:
+        - user
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            example: "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJtZWRvZHNfdGVzdCIsInN1YiI6ImY2YjRmYWUxLTU0OTYtNDM5OC1iZjM2LTAyMzgyNTA5N2ZkMiIsImF1ZCI6ImxvY2FsaG9zdDo4MDgwIiwiZXhwIjoxNzUyNTg1NjExLCJuYmYiOjE3NTI1MDEwMTEsImlhdCI6MTc1MjQ5OTIxMSwianRpIjoiSldUSUQiLCJLZXkiOiI0NTQ2ODI4Yy02MGI1LTExZjAtOWVjZi0wMDE1NWRmY2Y3NDIifQ.3ZL6D4NJns7VAA3SWEURBQT-NNudd3L-LQejwAkzbXrP28K9FU0vXZkM3yeNbuTNwcWBdlmZnM5Cjs9_Ks2B-A"
+          required: true
+      responses:
+        200:
+          description: successfully logout
+        400:
+          $ref: '#/components/responses/400'
+        500:
+          $ref: '#/components/responses/500'
+
+components:
+  schemas:
+    TokensPair:
+      type: object
+      properties:
+        access_token:
+          type: string
+          example: "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJtZWRvZHNfdGVzdCIsInN1YiI6ImY2YjRmYWUxLTU0OTYtNDM5OC1iZjM2LTAyMzgyNTA5N2ZkMiIsImF1ZCI6ImxvY2FsaG9zdDo4MDgwIiwiZXhwIjoxNzUyNTg1NjExLCJuYmYiOjE3NTI1MDEwMTEsImlhdCI6MTc1MjQ5OTIxMSwianRpIjoiSldUSUQiLCJLZXkiOiI0NTQ2ODI4Yy02MGI1LTExZjAtOWVjZi0wMDE1NWRmY2Y3NDIifQ.3ZL6D4NJns7VAA3SWEURBQT-NNudd3L-LQejwAkzbXrP28K9FU0vXZkM3yeNbuTNwcWBdlmZnM5Cjs9_Ks2B-A"
+        refresh_token:
+          type: string
+          example: "eyJUaW1lIjoiMjAyNS0wNy0xNCAxNjoyMDoxMS42MzA1MDM5ICswMzAwIE1TSyBtPSs4LjUyNjI5MzgwMSIsIktleSI6IjQ1NDY4MjhjLTYwYjUtMTFmMC05ZWNmLTAwMTU1ZGZjZjc0MiJ9"
+      required:
+        - access_token
+        - refresh_token
+    UserGuid:
+      type: object
+      properties:
+        user_guid:
+          type: string
+          example: "f6b4fae1-5496-4398-bf36-023825097fd2"
+  parameters:
+    UserGuidParam:
+      required: true
+      in: query
+      name: guid
+      schema:
+        type: string
+        example: "f6b4fae1-5496-4398-bf36-023825097fd2"
+    UserAgent:
+      name: User-Agent
+      in: header
+      schema:
+        type: string
+        example: "PostmanRuntime/7.44.1"
+      required: true
+
+  responses:
+    400:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+      description: Bad request
+    500:
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+      description: Internal Server Error
