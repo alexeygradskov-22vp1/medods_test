@@ -12,8 +12,8 @@ type ExternalServiceClient struct {
 	baseUrl string
 }
 
-func NewClient(client *http.Client, baseUrl string) *ExternalServiceClient {
-	return &ExternalServiceClient{client: client, baseUrl: baseUrl}
+func NewClient(conf *ExternalClientConfig) *ExternalServiceClient {
+	return &ExternalServiceClient{client: conf.client, baseUrl: conf.BaseUrl}
 }
 
 func (c *ExternalServiceClient) SendWebhook(path string, payload map[string]string) error {

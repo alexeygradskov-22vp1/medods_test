@@ -1,17 +1,17 @@
 package main
 
 import (
-	"database/sql"
-	"fmt"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/joho/godotenv"
+	"medods/database"
 	"medods/internal/api"
 	"medods/internal/client/external"
-	uow "medods/internal/repository/uow"
+	"medods/internal/repository/blacklist"
+	token2 "medods/internal/repository/token"
+	user2 "medods/internal/repository/user"
 	"medods/internal/service/token"
 	"medods/internal/service/user"
 	"net/http"
-	"os"
 )
 
 func main() {
@@ -19,25 +19,35 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		os.Getenv("PG_HOST"),
-		os.Getenv("PG_PORT"),
-		os.Getenv("PG_USER"),
-		os.Getenv("PG_PASSWORD"),
-		os.Getenv("PG_DB"),
-	)
-	db, err := sql.Open("pgx", dsn)
+
+	//database
+	dbConf, err := database.NewConfig()
 	if err != nil {
 		panic(err)
 	}
-	externalServiceBaseUrl := os.Getenv("EXTERNAL_SERVER_HOST")
-	if externalServiceBaseUrl == "" {
-		panic("Missing EXTERNAL_SERVER_HOST")
+	db, err := database.NewDatabase(dbConf)
+	if err != nil {
+		panic(err)
 	}
-	unit := uow.NewUnitOfWork(db)
+
+	//repositories
+	uRepo := user2.NewRepository(db)
+	tRepo := token2.NewRepository(db)
+	blRepo := blacklist.NewRepository(db)
+
+	//http client
 	httpClient := &http.Client{}
-	client := external.NewClient(httpClient, externalServiceBaseUrl)
-	ts := token.NewTService(unit, client)
-	us := user.NewUService(unit, ts)
+	clientConf, err := external.NewConfig(httpClient)
+
+	if err != nil {
+		panic(err)
+	}
+
+	client := external.NewClient(clientConf)
+
+	//services
+	ts := token.NewTService(client, blRepo, tRepo)
+	us := user.NewUService(uRepo, ts)
+
 	api.StartHttpServer(ts, us)
 }
