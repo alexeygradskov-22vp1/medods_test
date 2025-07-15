@@ -17,7 +17,6 @@ import (
 	"medods/internal/domain/token"
 	"medods/internal/repository/blacklist"
 	token2 "medods/internal/repository/token"
-	"medods/internal/repository/uow"
 	"time"
 )
 
@@ -27,18 +26,21 @@ const (
 )
 
 type TokenService struct {
-	uow *uow.UnitOfWork
-	c   *external.ExternalServiceClient
+	c      *external.ExternalServiceClient
+	blRepo *blacklist.BlacklistRepository
+	tRepo  *token2.TokenRepository
 }
 
-func NewTService(uow *uow.UnitOfWork, c *external.ExternalServiceClient) *TokenService {
-	return &TokenService{uow: uow, c: c}
+func NewTService(c *external.ExternalServiceClient, blRepo *blacklist.BlacklistRepository, tRepo *token2.TokenRepository) *TokenService {
+	return &TokenService{c: c, blRepo: blRepo, tRepo: tRepo}
 }
 
 var alg = jwt.NewHS512([]byte("secret_phrase"))
 
+// build access token
 func buildAccessToken(userGuid string, key string) (string, error) {
 	timeNow := time.Now()
+
 	pl := token.AccessTokenPayload{
 		Payload: jwt.Payload{
 			Issuer:         Issuer,
@@ -51,95 +53,133 @@ func buildAccessToken(userGuid string, key string) (string, error) {
 		},
 		Key: key,
 	}
+	//build jwt token by alg SHA512
 	buildedToken, err := jwt.Sign(pl, alg)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("jwt sign err %w", err)
 	}
+
 	return string(buildedToken), nil
 }
 
+// build refresh token
 func buildRefreshToken(key string) (refresh string, err error) {
-
+	//build payload
 	pl := token.RefreshTokenPayload{Time: time.Now().String(), Key: key}
+
+	//marshal payload to bytes
 	plBytes, err := json.Marshal(pl)
 	if err != nil {
 		return "", err
 	}
+
+	//calc len of slice base64 encoded payload
 	encodedLen := base64.RawURLEncoding.EncodedLen(len(plBytes))
+
 	refreshBytes := make([]byte, encodedLen)
+
+	// encode payload to base64
 	base64.RawURLEncoding.Encode(refreshBytes, plBytes)
+
 	refresh = string(refreshBytes)
 	return
 }
 
 func (ts *TokenService) Refresh(ctx context.Context, tokenPayload *token.TokensPair, data request.RequestData) (err error) {
+	//convert access token to bytes and verify it
 	tokenBytes := []byte(tokenPayload.AccessToken)
 	var tokenPl token.AccessTokenPayload
 	_, err = jwt.Verify(tokenBytes, alg, &tokenPl)
 	if err != nil {
-		return err
+		return fmt.Errorf("verify token error: %w", err)
 	}
+
+	//decode refresh token from base64 string to payload struct
 	var refreshTokenPl token.RefreshTokenPayload
 	err = decodeRefreshToken(&refreshTokenPl, tokenPayload.RefreshToken)
 	if err != nil {
-		return err
+		return fmt.Errorf("decode refresh token pl error: %w", err)
 	}
+
+	// compare keys of refresh and access tokens
 	if refreshTokenPl.Key != tokenPl.Key {
-		return errors.New("invalid token")
+		return fmt.Errorf("invalid token")
 	}
+
 	var access, refresh string
-	err = ts.uow.WithTransaction(ctx, func(tx *uow.UnitOfWork) error {
-		oldTokens, txErr := tx.Token.GetMany(ctx, token2.WithUserGuid(tokenPl.Subject), token2.WithActive(true))
-		if txErr != nil {
-			return txErr
+
+	// get old active refresh tokens from database by user guid
+	oldTokens, err := ts.tRepo.GetManyBy(ctx, []token2.FieldName{token2.UserGuidField, token2.ActiveField}, []interface{}{tokenPl.Subject, true})
+	if err != nil {
+		return fmt.Errorf("get old active tokens from db error: %w", err)
+	}
+
+	// generate uuid for unique key of payload
+	genUuid, err := uuid.NewUUID()
+	if err != nil {
+		return fmt.Errorf("generate uuid for payload error: %w", err)
+	}
+
+	// validate refresh token from user
+	validRefresh, err := findActiveRefreshTokenFromDBByRefreshToken(oldTokens, tokenPayload.RefreshToken)
+	if err != nil {
+		return fmt.Errorf("validate users refresh token error: %w", err)
+	}
+
+	//compare user-agent
+	if validRefresh.UserAgent != data.UserAgent {
+		err = ts.BlockToken(ctx, tokenPayload.AccessToken)
+		return fmt.Errorf("user agent mismatch")
+	}
+
+	//compare ip
+	if validRefresh.IP != data.IP {
+
+		//send webhook about changes of ip address
+		err = ts.c.SendWebhook("dummy_url", map[string]string{"warn": fmt.Sprintf("changed id from %s to %s", validRefresh.IP, data.IP)})
+		if err != nil {
+			log.Printf("error while sending webhook: %s", err)
 		}
-		genUuid, txErr := uuid.NewUUID()
-		if txErr != nil {
-			return txErr
-		}
-		validRefresh, txErr := findActiveRefreshTokenFromDBByRefreshToken(oldTokens, tokenPayload.RefreshToken)
-		if txErr != nil {
-			return txErr
-		}
-		if validRefresh.UserAgent != data.UserAgent {
-			txErr = ts.BlockToken(ctx, tokenPayload.AccessToken)
-			return errors.New("user agent mismatch")
-		}
-		if validRefresh.IP != data.IP {
-			txErr = ts.c.SendWebhook("dummy_url", map[string]string{"warn": fmt.Sprintf("changed id from %s to %s", validRefresh.IP, data.IP)})
-			if txErr != nil {
-				log.Printf("error while sending webhook: %s", txErr.Error())
-			}
-		}
-		access, txErr = buildAccessToken(validRefresh.UserGuid, genUuid.String())
-		if txErr != nil {
-			return txErr
-		}
-		refresh, err = buildRefreshToken(genUuid.String())
-		if txErr != nil {
-			return txErr
-		}
-		bcrypted, txErr := processForStorageInDatabase(refresh)
-		if txErr != nil {
-			return txErr
-		}
-		u := token2.NewUpdate(token2.WithUpdateActive(false))
-		txErr = tx.Token.Update(ctx, u, token2.WithUserGuid(validRefresh.UserGuid))
-		if txErr != nil {
-			return txErr
-		}
-		created := &token2.Token{RefreshToken: bcrypted, UserGuid: validRefresh.UserGuid, Active: true, UserAgent: data.UserAgent, IP: data.IP}
-		txErr = tx.Token.Create(ctx, created)
-		if txErr != nil {
-			return txErr
-		}
-		return nil
-	})
+	}
+
+	//build access token
+	access, err = buildAccessToken(validRefresh.UserGuid, genUuid.String())
+	if err != nil {
+		return fmt.Errorf("build access token error: %w", err)
+	}
+
+	//build refresh token
+	refresh, err = buildRefreshToken(genUuid.String())
+	if err != nil {
+		return fmt.Errorf("build refresh token: %w", err)
+	}
+
+	//process refresh token for save to database
+	bcrypted, txErr := processForStorageInDatabase(refresh)
+	if txErr != nil {
+		return fmt.Errorf("proccess token to database format error: %w", txErr)
+	}
+
+	// deactivate old refresh token
+	validRefresh.Active = false
+	err = ts.tRepo.Update(ctx, validRefresh, []token2.FieldName{token2.IdField}, []interface{}{validRefresh.ID})
+	if err != nil {
+		return fmt.Errorf("deactivate old refresh token error: %w", txErr)
+	}
+
+	// save new refresh token to database
+	created := &token2.Token{RefreshToken: bcrypted, UserGuid: validRefresh.UserGuid, Active: true, UserAgent: data.UserAgent, IP: data.IP}
+	err = ts.tRepo.Create(ctx, created)
+	if err != nil {
+		return fmt.Errorf("save new refresh token error: %w", txErr)
+	}
+
 	tokenPayload.AccessToken = access
 	tokenPayload.RefreshToken = refresh
 	return err
 }
 
+// convert token to sha256 and crypt by bcrypt alg
 func processForStorageInDatabase(token string) (string, error) {
 	refreshBytes := []byte(token)
 	sh := sha256.Sum256(refreshBytes)
@@ -147,12 +187,16 @@ func processForStorageInDatabase(token string) (string, error) {
 	return string(hashed), err
 }
 
+// Valid validate access token
 func (ts *TokenService) Valid(accessToken string, dst *token.AccessTokenPayload) error {
+	// try to verify jwt token
 	tokenBytes := []byte(accessToken)
 	_, err := jwt.Verify(tokenBytes, alg, &dst)
 	if err != nil {
 		return err
 	}
+
+	//check of expiration time
 	now := time.Now()
 	if now.After(dst.ExpirationTime.Time) {
 		return errors.New("token expired")
@@ -170,47 +214,56 @@ func decodeRefreshToken(pl *token.RefreshTokenPayload, refresh string) error {
 
 func (ts *TokenService) Build(ctx context.Context, id string, data request.RequestData) (token.TokensPair, error) {
 	var refresh string
+
+	//generate new uuid for payload
 	genUuid, err := uuid.NewUUID()
 	if err != nil {
-		return token.TokensPair{}, err
+		return token.TokensPair{}, fmt.Errorf("generate uuid for token payload: %w", err)
 	}
+
+	//build access token
 	access, err := buildAccessToken(id, genUuid.String())
+	if err != nil {
+		return token.TokensPair{}, fmt.Errorf("build access token error: %w", err)
+	}
+
+	//build refresh token
+	refreshResult, err := buildRefreshToken(genUuid.String())
+	if err != nil {
+		return token.TokensPair{}, fmt.Errorf("build refresh token error: %w", err)
+	}
+
+	//process refresh token to database format
+	bcryptedPass, err := processForStorageInDatabase(refreshResult)
+	if err != nil {
+		return token.TokensPair{}, fmt.Errorf("proccess token to database format error: %w", err)
+	}
+
+	//find exists active tokens
+	oldToken, err := ts.tRepo.GetOneBy(ctx, []token2.FieldName{token2.UserGuidField, token2.ActiveField}, []interface{}{id, true})
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+
+		} else {
+			return token.TokensPair{}, fmt.Errorf("get old token: %w", err)
+		}
+	} else {
+		oldToken.Active = false
+		if err = ts.tRepo.Update(ctx, oldToken, []token2.FieldName{token2.IdField}, []interface{}{oldToken.ID}); err != nil {
+			return token.TokensPair{}, fmt.Errorf("deactivate old token: %w", err)
+		}
+	}
+
+	//create new refresh token
+	refreshToken := &token2.Token{UserGuid: id, RefreshToken: bcryptedPass, Active: true, IP: data.IP, UserAgent: data.UserAgent}
+
+	err = ts.tRepo.Create(ctx, refreshToken) //create new token
 	if err != nil {
 		return token.TokensPair{}, err
 	}
-	err = ts.uow.WithTransaction(ctx, func(tx *uow.UnitOfWork) error {
-		refreshResult, txErr := buildRefreshToken(genUuid.String())
-		if txErr != nil {
-			return txErr
-		}
-		bcryptedPass, txErr := processForStorageInDatabase(refreshResult)
-		if txErr != nil {
-			return txErr
-		}
-		refreshToken, txErr := tx.Token.Get(ctx, token2.WithUserGuid(id), token2.WithActive(true))
-		refreshToken = &token2.Token{UserGuid: id, RefreshToken: bcryptedPass, Active: true, IP: data.IP, UserAgent: data.UserAgent}
-		switch {
-		case txErr == nil:
-			u := token2.NewUpdate(token2.WithUpdateActive(false))
-			txErr = tx.Token.Update(ctx, u)
-			if txErr != nil {
-				return txErr
-			}
-			txErr = tx.Token.Create(ctx, refreshToken)
-			if txErr != nil {
-				return txErr
-			}
-		case txErr != nil && errors.Is(txErr, sql.ErrNoRows):
-			txErr = tx.Token.Create(ctx, refreshToken)
-			if txErr != nil {
-				return txErr
-			}
-		case txErr != nil:
-			return txErr
-		}
-		refresh = refreshResult
-		return nil
-	})
+
+	refresh = refreshResult
 
 	return token.TokensPair{AccessToken: access, RefreshToken: refresh}, nil
 }
@@ -222,47 +275,61 @@ func compareUserTokenAndDBToken(userToken string, dbToken string) bool {
 }
 
 func (ts *TokenService) BlockToken(ctx context.Context, accessToken string) error {
-	err := ts.uow.BlackList.Create(ctx, &blacklist.Blacklist{AccessToken: accessToken})
+	//block token
+	err := ts.blRepo.Create(ctx, &blacklist.Blacklist{AccessToken: accessToken})
 	if err != nil {
-		return err
+		return fmt.Errorf("block token: %w", err)
 	}
+
+	//verify access token and store to struct
 	tokenBytes := []byte(accessToken)
 	var tokenPl token.AccessTokenPayload
 	_, err = jwt.Verify(tokenBytes, alg, &tokenPl)
 	if err != nil {
-		return err
+		return fmt.Errorf("verify token: %w", err)
 	}
-	oldToken, err := ts.uow.Token.Get(ctx, token2.WithUserGuid(tokenPl.Subject), token2.WithActive(true))
+
+	//find old refresh token
+	oldToken, err := ts.tRepo.GetOneBy(ctx,
+		[]token2.FieldName{token2.UserGuidField, token2.ActiveField},
+		[]interface{}{tokenPl.Subject, true})
 	if err != nil {
-		return err
+		return fmt.Errorf("get old token: %w", err)
 	}
-	u := token2.NewUpdate(token2.WithUpdateActive(false))
-	err = ts.uow.Token.Update(ctx, u, token2.WithID(oldToken.ID))
+
+	//deactivate old refresh token
+	oldToken.Active = false
+	err = ts.tRepo.Update(ctx, oldToken, []token2.FieldName{token2.IdField}, []interface{}{oldToken.ID})
 	if err != nil {
-		return err
+		return fmt.Errorf("deactivate token: %w", err)
 	}
 	return nil
 }
 
 func (ts *TokenService) VerifyToken(ctx context.Context, accessToken string) bool {
-	_, err := ts.uow.BlackList.Get(ctx, blacklist.WithAccessToken(accessToken))
+	// find token in black list
+	_, err := ts.blRepo.GetOneBy(ctx, []blacklist.FieldName{blacklist.AccessTokenFieldName}, []interface{}{accessToken})
+
+	//handle error
 	switch {
 	case err != nil && errors.Is(err, sql.ErrNoRows):
-		return true
+		return true // token not found
 	case err != nil:
-		return false
+		return false // error
 	}
 	return false
 }
 
-func findActiveRefreshTokenFromDBByRefreshToken(tokens token2.Tokens, userRefreshToken string) (*token2.Token, error) {
+func findActiveRefreshTokenFromDBByRefreshToken(tokens []token2.Token, userRefreshToken string) (*token2.Token, error) {
 	var validRefresh *token2.Token
+	//compare bcrypt user token and bcrypt tokens from database
 	for _, v := range tokens {
 		if compareUserTokenAndDBToken(userRefreshToken, v.RefreshToken) {
 			validRefresh = &v
 			break
 		}
 	}
+	//if token not found in database then it not valid
 	if validRefresh == nil {
 		return nil, errors.New("refresh token is not valid")
 	}

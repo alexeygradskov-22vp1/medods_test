@@ -8,8 +8,11 @@ require (
 	github.com/gofiber/fiber/v2 v2.49.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.2
+	github.com/jmoiron/sqlx v1.4.0
 	github.com/joho/godotenv v1.5.1
+	github.com/lib/pq v1.10.9
 	github.com/oapi-codegen/runtime v1.1.1
+	go.dataddo.com/env v1.1.0
 	golang.org/x/crypto v0.40.0
 )
 
